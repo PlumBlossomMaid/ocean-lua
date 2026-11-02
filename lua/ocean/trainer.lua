@@ -203,6 +203,19 @@ function Trainer:_run_validation(model, val_loader)
     model:validation_step(batch, batch_idx)
     self:_fire("on_validation_batch_end", model, nil, batch, batch_idx)
   end
+  -- Keras 装配的 MetricCollection:compute 各指标并写日志
+  -- (torchmetrics/Keras 语义:验证结果每 epoch 上报;reset 留到 epoch 边界)
+  local mc = type(model.configure_metrics) == "function"
+                and model:configure_metrics()
+  if mc ~= nil and type(mc.log_dict) == "function" then
+    local log = mc:log_dict()
+    for name, v in pairs(log) do
+      self._metrics_acc["val_" .. name] =
+        loggers_mod.MetricValue.to_number(v)
+    end
+    self._logger:log(self._metrics_acc, self._step, self._epoch)
+    mc:reset()
+  end
   self:_fire("on_validation_epoch_end", model, self._epoch)
 end
 

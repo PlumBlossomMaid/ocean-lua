@@ -93,41 +93,60 @@ Model.prepare = rule {
   end
 end)
 
--- fit{loader, epochs} -- Keras 快捷训练(单优化器/单 loss)。
+-- fit{loader, epochs, val_loader} -- Keras 快捷训练(单优化器/单 loss)。
+-- val_loader 可选:传入时每 epoch 后跑验证(metrics 累积,torchmetrics/Keras
+-- validation_data 语义),metrics 计算结果可在 trainer 的 logger 里读。
 Model.fit = rule {
   { name = "self", type = argrule.any },
   { name = "loader", type = argrule.any,
-    doc = "paddle.io.DataLoader" },
+    doc = "paddle.io.DataLoader (train)" },
   { name = "epochs", type = argrule.number, opt = true, default = 1,
     doc = "epoch count" },
-}(function(self, loader, epochs)
-  local trainer = require("ocean.trainer").Trainer{
+  { name = "val_loader", type = argrule.any, opt = true, default = nil,
+    doc = "optional validation DataLoader (metrics accumulate each epoch)" },
+}(function(self, loader, epochs, val_loader)
+  local Trainer = require("ocean.trainer")   -- trainer.lua returns the class
+  local trainer = Trainer{
     max_epochs = epochs,
     accelerator = self.accelerator,
     strategy = self.strategy,
     precision = self.precision,
+    enable_checkpointing = false,
+    enable_progress_bar = false,
   }
-  trainer:fit(self, loader)
+  self:fit_trainer(trainer)   -- 子类可覆写做额外装配
+  trainer:fit(self, loader, val_loader)
+  self._last_trainer = trainer
+  return trainer
 end)
+
+-- fit_trainer(trainer):Keras fit 前的钩子(子类可覆写做额外装配)。
+function Model:fit_trainer(_trainer)
+  -- default no-op
+end
 
 -- ---------------------------------------------------------------------
 -- Lightning hooks(子类可覆写;默认 Keras 语义)
 -- ---------------------------------------------------------------------
 
 -- training_step(batch, batch_idx):返回 loss tensor。Keras 默认:net(x) 后
--- 用 _loss_fn(pred, target)。
+-- 用 _loss_fn(pred, target),并把 loss log 成 "train_loss"(Lightning
+-- 语义:trainer 在每个 batch 后读日志)。
 function Model:training_step(batch, batch_idx)
   local pred = self:forward(batch)
   local target = batch[2]
   if self._loss_fn then
-    return self._loss_fn(pred, target)
+    local loss = self._loss_fn(pred, target)
+    self:log("train_loss", loss)
+    return loss
   end
   error("ocean.Model:training_step() not implemented (define it, or use "
         .. "Keras prepare{loss=...})", 2)
 end
 
 -- validation_step(batch, batch_idx):返回 None(或 loss)。Keras 默认:
--- net(x) + _loss_fn 算 val 指标。
+-- net(x) + _loss_fn 算 val loss(log "val_loss"),metrics 由 trainer 在
+-- _run_validation 末尾统一 compute/reset(torchmetrics/Keras 语义)。
 function Model:validation_step(batch, batch_idx)
   local pred = self:forward(batch)
   local target = batch[2]
@@ -135,7 +154,9 @@ function Model:validation_step(batch, batch_idx)
     self._metrics:update(pred, target)
   end
   if self._loss_fn then
-    return self._loss_fn(pred, target)
+    local loss = self._loss_fn(pred, target)
+    self:log("val_loss", loss)
+    return loss
   end
   return nil
 end
